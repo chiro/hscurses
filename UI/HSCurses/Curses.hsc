@@ -67,6 +67,10 @@ module UI.HSCurses.Curses (
     -- * Input
     getCh, getch, decodeKey, ungetCh, keyResizeCode,
 
+#if defined(HAVE_WCHAR_H) && (defined(HAVE_LIBNCURSESW) || defined(HAVE_LIBPDCURSESW))
+    getWCh, get_wch,
+#endif
+
     -- * Input Options
     cBreak,             -- :: Bool -> IO ()
     raw,                -- :: Bool -> IO ()
@@ -209,6 +213,12 @@ import System.Posix.Signals
 import Data.Bits
 #endif
 
+#if defined(HAVE_WCHAR_H)
+
+#include <wchar.h>
+type CWInt = (#type wint_t)
+
+#endif
 
 ------------------------------------------------------------------------
 --
@@ -1037,6 +1047,17 @@ foreign import ccall unsafe "HSCurses.h hscurses_nomacro_getch" getch :: IO CInt
 foreign import ccall unsafe "HSCurses.h getch" getch :: IO CInt
 #endif
 
+#if defined(HAVE_WCHAR_H) && (defined(HAVE_LIBNCURSESW) || defined(HAVE_LIBPDCURSESW))
+--
+-- | >      The get_wch, wget_wch, mvget_wch and mvwget_wch, routines read a
+--   >      wide character from the window.
+#if defined (HAVE_LIBPDCURSESW)
+foreign import ccall unsafe "HSCurses.h hscurses_nomacro_get_wch" get_wch :: Ptr CWInt -> IO CInt
+#else
+foreign import ccall unsafe "HSCurses.h get_wch" get_wch :: Ptr CWInt -> IO CInt
+#endif
+#endif
+
 --foreign import ccall unsafe def_prog_mode :: IO CInt
 --foreign import ccall unsafe reset_prog_mode :: IO CInt
 foreign import ccall unsafe flushinp :: IO CInt
@@ -1174,7 +1195,11 @@ decodeKey key = case key of
 #ifdef KEY_MOUSE
     (#const KEY_MOUSE)         -> KeyMouse
 #endif
+#ifdef HAVE_WCHAR_H && HAVE_NCURSESW_NCURSES_H
+    _                          -> KeyChar (chr (fromIntegral key))
+#else
     _                          -> KeyUnknown (fromIntegral key)
+#endif
 
 keyResizeCode :: Maybe CInt
 #ifdef KEY_RESIZE
@@ -1259,6 +1284,41 @@ getCh =
          k -> let k' = decodeKey k
                   in do debug ("getCh: result = " ++ show k')
                         return k'
+
+#if defined(HAVE_WCHAR_H) && (defined(HAVE_LIBNCURSESW) || defined(HAVE_LIBPDCURSESW))
+--
+-- | read a wide character from the window
+--
+getWCh :: IO Key
+getWCh =
+  do debug "getWCh called"
+     tid <- forkIO getchToInputBuf
+     d <- readChan inputBuf
+     killThread tid
+
+     (v,c) <- case d of
+       BufDirect x ->
+         do debug "getWCh: getting data directly from buffer"
+            return (x,x)
+       DataViaGetch ->
+         do debug "getWCh: getting data via getwch"
+            p <- malloc
+            v <- get_wch p
+            wc <- peek p
+            free p
+            return (v,fromIntegral wc)
+
+     case v of
+       (#const ERR) ->
+         do e <- getErrno
+            if e `elem` [eAGAIN, eINTR]
+              then do debug "Curses.getWCh returned eAGAIN and eINTR"
+                      getWCh
+              else throwErrno "HSCurses.Curses.getWCh"
+       _ -> let c' = decodeKey (fromIntegral c)
+            in do debug ("getWCh: result = " ++ show c')
+                  return c'
+#endif
 
 
 resizeTerminal :: Int -> Int -> IO ()
